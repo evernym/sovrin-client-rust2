@@ -269,8 +269,9 @@ impl IssuerCommandExecutor {
 
         self.anoncreds_service.issuer.revoke(
             &revocation_registry,
-            &revocation_registry_private.tails,
-            user_revoc_index)?;
+            &revocation_registry_private.tails_dash,
+            user_revoc_index
+        )?;
 
         let revoc_reg_update_json = RevocationRegistry::to_json(&revocation_registry.borrow())
             .map_err(|err| CommonError::InvalidState(format!("Invalid revocation registry: {}", err.to_string())))?;

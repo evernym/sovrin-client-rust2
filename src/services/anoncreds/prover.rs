@@ -48,7 +48,6 @@ use services::anoncreds::types::{
     ProofJson
 };
 use services::anoncreds::helpers::{
-    AppendByteArray,
     get_mtilde,
     four_squares,
     get_hash_as_int,
@@ -59,7 +58,7 @@ use services::anoncreds::helpers::{
 use services::anoncreds::verifier::Verifier;
 use services::anoncreds::issuer::Issuer;
 use utils::crypto::bn::BigNumber;
-use utils::crypto::pair::{GroupOrderElement, PointG1, Pair};
+use utils::crypto::pair::{GroupOrderElement, PointG1, PointG2, Pair};
 use std::collections::{HashMap, HashSet};
 use std::cell::RefCell;
 use services::anoncreds::types::{AttributeInfo, ClaimInfo, RequestedClaimsJson, ProofRequestJson};
@@ -166,20 +165,20 @@ impl Prover {
         }
 
         let pair_gg_calc = Pair::pair(&pkr.pk.add(&claim.borrow().g_i)?, &claim.borrow().witness.sigma_i)?;
-        let pair_gg = Pair::pair(&pkr.g, &pkr.g)?;
+        let pair_gg = Pair::pair(&pkr.g, &pkr.g_dash)?;
         if pair_gg_calc != pair_gg {
             return Err(CryptoError::InvalidStructure("issuer is sending incorrect data".to_string()));
         }
 
         let m2 = GroupOrderElement::from_bytes(&context_attribute.to_bytes()?)?;
 
-        let pair_h1 = Pair::pair(&claim.borrow().sigma, &pkr.y.add(&pkr.h.mul(&claim.borrow().c)?)?)?;
+        let pair_h1 = Pair::pair(&claim.borrow().sigma, &pkr.y.add(&pkr.h_cap.mul(&claim.borrow().c)?)?)?;
         let pair_h2 = Pair::pair(
             &pkr.h0
                 .add(&pkr.h1.mul(&m2)?)?
                 .add(&pkr.h2.mul(&claim.borrow().vr_prime_prime)?)?
                 .add(&claim.borrow().g_i)?,
-            &pkr.h
+            &pkr.h_cap
         )?;
 
         if pair_h1 != pair_h2 {
@@ -323,7 +322,7 @@ impl Prover {
                         revoc_regs: &HashMap<String, RevocationRegistry>,
                         requested_claims: &RequestedClaimsJson,
                         ms: &BigNumber,
-                        tails: &HashMap<i32, PointG1>)
+                        tails: &HashMap<i32, PointG2>)
                         -> Result<ProofJson, CryptoError> {
         info!(target: "anoncreds_service", "Prover create proof -> start");
 
@@ -353,7 +352,7 @@ impl Prover {
                                                                    .ok_or(CryptoError::InvalidStructure("Field public_key_revocation not found".to_string()))?,
                                                                tails)?;
 
-                c_list.append_vec(&proof.as_c_list()?)?;
+                c_list.extend_from_slice(&proof.as_c_list()?);
                 tau_list.extend_from_slice(&proof.as_tau_list()?);
                 m2_tilde = Some(group_element_to_bignum(&proof.tau_list_params.m2)?);
                 non_revoc_init_proof = Some(proof);
@@ -448,7 +447,7 @@ impl Prover {
     }
 
     fn _init_non_revocation_proof(claim: &RefCell<NonRevocationClaim>, accum: &Accumulator,
-                                  pkr: &RevocationPublicKey, tails: &HashMap<i32, PointG1>)
+                                  pkr: &RevocationPublicKey, tails: &HashMap<i32, PointG2>)
                                   -> Result<NonRevocInitProof, CryptoError> {
         info!(target: "anoncreds_service", "Prover init non-revocation proof -> start");
         Prover::_update_non_revocation_claim(claim, accum, tails)?;
@@ -464,7 +463,7 @@ impl Prover {
     }
 
     fn _update_non_revocation_claim(claim: &RefCell<NonRevocationClaim>,
-                                    accum: &Accumulator, tails: &HashMap<i32, PointG1>)
+                                    accum: &Accumulator, tails: &HashMap<i32, PointG2>)
                                     -> Result<(), CryptoError> {
         if !accum.v.contains(&claim.borrow().i) {
             return Err(CryptoError::InvalidStructure("Can not update Witness. I'm revoced.".to_string()))
@@ -477,14 +476,14 @@ impl Prover {
                 mut_claim.witness.v.difference(&accum.v).cloned().collect();
             let v_new_minus_old: HashSet<i32> =
                 accum.v.difference(&mut_claim.witness.v).cloned().collect();
-            let mut omega_denom = PointG1::new_inf()?;
+            let mut omega_denom = PointG2::new_inf()?;
             for j in v_old_minus_new.iter() {
                 omega_denom = omega_denom.add(
                     tails.get(&(accum.max_claim_num + 1 - j + mut_claim.i))
                         .ok_or(CryptoError::InvalidStructure(format!("Key not found {} in tails", accum.max_claim_num + 1 - j + mut_claim.i)))?)?;
             }
-            let mut omega_num = PointG1::new_inf()?;
-            let mut new_omega: PointG1 = mut_claim.witness.omega.clone();
+            let mut omega_num = PointG2::new_inf()?;
+            let mut new_omega: PointG2 = mut_claim.witness.omega.clone();
             for j in v_old_minus_new.iter() {
                 omega_num = omega_num.add(
                     tails.get(&(accum.max_claim_num + 1 - j + mut_claim.i))
@@ -815,17 +814,17 @@ impl Prover {
 
         let w = claim.witness.omega
             .add(
-                &pkr.htilde.mul(&params.r_prime)?
+                &pkr.h_cap.mul(&params.r_prime)?
             )?;
 
         let s = claim.witness.sigma_i
             .add(
-                &pkr.htilde.mul(&params.r_prime_prime)?
+                &pkr.h_cap.mul(&params.r_prime_prime)?
             )?;
 
         let u = claim.witness.u_i
             .add(
-                &pkr.htilde.mul(&params.r_prime_prime_prime)?
+                &pkr.h_cap.mul(&params.r_prime_prime_prime)?
             )?;
 
         Ok(NonRevocProofCList::new(e, d, a, g, w, s, u))
@@ -1332,8 +1331,8 @@ pub mod mocks {
     pub fn get_non_revocation_proof_c_list() -> NonRevocProofCList {
         NonRevocProofCList::new(PointG1::new().unwrap(), PointG1::new().unwrap(),
                                 PointG1::new().unwrap(), PointG1::new().unwrap(),
-                                PointG1::new().unwrap(), PointG1::new().unwrap(),
-                                PointG1::new().unwrap()
+                                PointG2::new().unwrap(), PointG2::new().unwrap(),
+                                PointG2::new().unwrap()
         )
     }
 
@@ -1498,17 +1497,19 @@ pub mod mocks {
     }
 
     pub fn get_public_key_revocation() -> RevocationPublicKey {
-        RevocationPublicKey::new(PointG1::new().unwrap(), PointG1::new().unwrap(),
+        RevocationPublicKey::new(PointG1::new().unwrap(), PointG2::new().unwrap(),
                                  PointG1::new().unwrap(), PointG1::new().unwrap(),
                                  PointG1::new().unwrap(), PointG1::new().unwrap(),
-                                 PointG1::new().unwrap(), PointG1::new().unwrap(),
-                                 PointG1::new().unwrap(), GroupOrderElement::new().unwrap())
+                                 PointG1::new().unwrap(), PointG2::new().unwrap(),
+                                 PointG2::new().unwrap(), PointG1::new().unwrap(),
+                                 PointG2::new().unwrap(),
+                                 GroupOrderElement::new().unwrap())
     }
 
     pub fn get_accumulator() -> Accumulator {
         let mut v: HashSet<i32> = HashSet::new();
         v.insert(1);
-        Accumulator::new(PointG1::new().unwrap(), v, 5, 2)
+        Accumulator::new(PointG2::new().unwrap(), v, 5, 2)
     }
 
     pub fn get_tails() -> HashMap<i32, PointG1> {
@@ -1519,8 +1520,8 @@ pub mod mocks {
 
     pub fn get_witness() -> Witness {
         Witness::new(
-            PointG1::new().unwrap(), PointG1::new().unwrap(), PointG1::new().unwrap(),
-            PointG1::new().unwrap(), HashSet::from_iter(vec![1].iter().cloned()
+            PointG2::new().unwrap(), PointG2::new().unwrap(), PointG1::new().unwrap(),
+            PointG2::new().unwrap(), HashSet::from_iter(vec![1].iter().cloned()
             )
         )
     }
