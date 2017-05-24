@@ -133,7 +133,7 @@ impl TransactionHandler {
             self.pending_commands.insert(tmp.req_id, pc);
             for node in &self.nodes {
                 let node: &RemoteNode = node;
-                node.send_str(cmd);
+                node.send_str(cmd).unwrap();
             }
         }
     }
@@ -155,9 +155,10 @@ impl PoolWorker {
         };
         let ctx: zmq::Context = zmq::Context::new();
         for gen_txn in &merkle_tree {
-            let mut rn: RemoteNode = RemoteNode::new(gen_txn.as_str());
-            rn.connect(&ctx);
-            rn.zsock.as_ref().unwrap().send("pi".as_bytes(), 0).expect("send ping");
+            let gen_txn: GenTransaction = GenTransaction::from_json(gen_txn)?;
+            let mut rn: RemoteNode = RemoteNode::new(&gen_txn)?;
+            rn.connect(&ctx)?;
+            rn.send_str("pi")?;
             self.handler.nodes_mut().push(rn);
         }
         self.handler.set_f(PoolWorker::get_f(merkle_tree.count())); //TODO set cnt to connect
@@ -324,10 +325,10 @@ impl Pool {
         })
     }
 
-    pub fn send_tx(&self, cmd_id: i32, json: &str) {
+    pub fn send_tx(&self, cmd_id: i32, json: &str) -> Result<(), PoolError> {
         let mut buf = [0u8; 4];
         LittleEndian::write_i32(&mut buf, cmd_id);
-        self.cmd_sock.send_multipart(&[json.as_bytes(), &buf], zmq::DONTWAIT).expect("send to cmd sock");
+        Ok(self.cmd_sock.send_multipart(&[json.as_bytes(), &buf], zmq::DONTWAIT)?)
     }
 }
 
@@ -357,21 +358,32 @@ impl Debug for RemoteNode {
 }
 
 impl RemoteNode {
-    fn new(txn: &str) -> RemoteNode {
-        let gen_tx = GenTransaction::from_json(txn).expect("RemoteNode parsing");
-        RemoteNode::from(gen_tx)
+    fn new(txn: &GenTransaction) -> Result<RemoteNode, PoolError> {
+        let public_key = txn.dest.as_str().from_base58()
+            .map_err(|e| { PoolError::InvalidData("Invalid field dest in genesis transaction".to_string()) })?;
+        Ok(RemoteNode {
+            verify_key: ED25519::pk_to_curve25519(&public_key),
+            public_key: public_key,
+            zaddr: format!("tcp://{}:{}", txn.data.client_ip, txn.data.client_port),
+            zsock: None,
+            name: txn.data.alias.clone(),
+        })
     }
 
-    fn connect(&mut self, ctx: &zmq::Context) {
-        let key_pair = zmq::CurveKeyPair::new().expect("create key pair");
-        let s = ctx.socket(zmq::SocketType::DEALER).expect("socket for Node");
-        s.set_identity(key_pair.public_key.as_bytes()).expect("set identity");
-        s.set_curve_secretkey(key_pair.secret_key.as_str()).expect("set secret key");
-        s.set_curve_publickey(key_pair.public_key.as_str()).expect("set public key");
-        s.set_curve_serverkey(zmq::z85_encode(self.verify_key.as_slice()).unwrap().as_str()).expect("set verify key");
-        s.set_linger(0).expect("set linger"); //TODO set correct timeout
-        s.connect(self.zaddr.as_str()).expect("connect to Node");
+    fn connect(&mut self, ctx: &zmq::Context) -> Result<(), PoolError> {
+        let key_pair = zmq::CurveKeyPair::new()?;
+        let s = ctx.socket(zmq::SocketType::DEALER)?;
+        s.set_identity(key_pair.public_key.as_bytes())?;
+        s.set_curve_secretkey(key_pair.secret_key.as_str())?;
+        s.set_curve_publickey(key_pair.public_key.as_str())?;
+        s.set_curve_serverkey(
+            zmq::z85_encode(self.verify_key.as_slice())
+                .map_err(|err| { PoolError::InvalidData("Can't encode server key as z85".to_string()) })?
+                .as_str())?;
+        s.set_linger(0)?; //TODO set correct timeout
+        s.connect(self.zaddr.as_str())?;
         self.zsock = Some(s);
+        Ok(())
     }
 
     fn recv_msg(&self) -> Result<Option<String>, PoolError> {
@@ -380,37 +392,24 @@ impl RemoteNode {
                 PoolError::Io(io::Error::from(io::ErrorKind::InvalidData))
             }
         }
-        let msg: String = self.zsock.as_ref().unwrap().recv_string(zmq::DONTWAIT)??;
+        let msg: String = self.zsock.as_ref()
+            .ok_or(PoolError::InvalidState("Try to receive msg for unconnected RemoteNode".to_string()))?
+            .recv_string(zmq::DONTWAIT)??;
         info!(target: "RemoteNode_recv_msg", "{} {}", self.name, msg);
 
-        match msg.as_ref() {
-            "pi" => Ok(None), //TODO send pong
-            _ => Ok(Some(msg))
-        }
+        Ok(Some(msg))
     }
 
-    fn send_str(&self, str: &str) {
+    fn send_str(&self, str: &str) -> Result<(), PoolError> {
         info!("Sending {:?}", str);
-        self.zsock.as_ref().unwrap()
-            .send_str(str, zmq::DONTWAIT)
-            .unwrap();
+        self.zsock.as_ref()
+            .ok_or(PoolError::InvalidState("Try to send str for unconnected RemoteNode".to_string()))?
+            .send_str(str, zmq::DONTWAIT)?;
+        Ok(())
     }
 
-    fn send_msg(&self, msg: &Message) {
-        self.send_str(msg.to_json().unwrap().as_str());
-    }
-}
-
-impl From<GenTransaction> for RemoteNode {
-    fn from(tx: GenTransaction) -> RemoteNode {
-        let public_key = tx.dest.as_str().from_base58().expect("dest field in GenTransaction isn't valid");
-        RemoteNode {
-            verify_key: ED25519::pk_to_curve25519(&public_key),
-            public_key: public_key,
-            zaddr: format!("tcp://{}:{}", tx.data.client_ip, tx.data.client_port),
-            zsock: None,
-            name: tx.data.alias,
-        }
+    fn send_msg(&self, msg: &Message) -> Result<(), PoolError> {
+        self.send_str(msg.to_json()?.as_str())
     }
 }
 
@@ -475,7 +474,7 @@ impl PoolService {
         let cmd_id: i32 = SequenceUtils::get_next_id();
         self.pools.try_borrow()?
             .get(&handle).ok_or(PoolError::InvalidHandle("No pool with requested handle".to_string()))?
-            .send_tx(cmd_id, json);
+            .send_tx(cmd_id, json)?;
         Ok(cmd_id)
     }
 
@@ -582,7 +581,7 @@ mod tests {
             cmd_sock: send_cmd_sock,
         };
         let test_data = "str_instead_of_tx_json";
-        pool.send_tx(0, test_data);
+        pool.send_tx(0, test_data).unwrap();
         assert_eq!(recv_cmd_sock.recv_string(zmq::DONTWAIT).unwrap().unwrap(), test_data);
     }
 
@@ -751,8 +750,8 @@ mod tests {
         let mut ch: CatchupHandler = Default::default();
         let (gt, handle) = nodes_emulator::start();
         ch.merkle_tree.append(gt.to_json().unwrap()).unwrap();
-        let mut rn: RemoteNode = RemoteNode::from(gt);
-        rn.connect(&zmq::Context::new());
+        let mut rn: RemoteNode = RemoteNode::new(&gt).unwrap();
+        rn.connect(&zmq::Context::new()).unwrap();
         ch.nodes.push(rn);
         ch.new_mt_size = 2;
 
@@ -773,10 +772,10 @@ mod tests {
     #[test]
     fn remote_node_connect_works_and_can_ping_pong() {
         let (gt, handle) = nodes_emulator::start();
-        let mut rn: RemoteNode = RemoteNode::from(gt);
+        let mut rn: RemoteNode = RemoteNode::new(&gt).unwrap();
         let ctx = zmq::Context::new();
-        rn.connect(&ctx);
-        rn.zsock.as_ref().expect("sock").send_str("pi", zmq::DONTWAIT).expect("send");
+        rn.connect(&ctx).unwrap();
+        rn.send_str("pi").expect("send");
         rn.zsock.as_ref().expect("sock").poll(zmq::POLLIN, nodes_emulator::POLL_TIMEOUT).expect("poll");
         assert_eq!("po", rn.zsock.as_ref().expect("sock").recv_string(zmq::DONTWAIT).expect("recv").expect("string").as_str());
         handle.join().expect("join");
