@@ -1,5 +1,6 @@
 extern crate libc;
 
+pub mod agent;
 pub mod anoncreds;
 pub mod signus;
 pub mod ledger;
@@ -91,6 +92,9 @@ pub enum ErrorCode {
 
     // IO error during access pool ledger files
     PoolLedgerIOError,
+
+    // Pool ledger terminated
+    PoolLedgerTerminated,
 
     // No concensus during ledger operation
     LedgerNoConsensusError,
