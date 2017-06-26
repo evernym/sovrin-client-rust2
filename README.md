@@ -36,7 +36,10 @@ Checkout https://github.com/miracl/milagro-crypto-c/ repository.
 ### Build libzmq-pw
 
 Checkout https://github.com/evernym/libzmq-pw repository.
-- build builds/msvc/vs2017/libzmq.sln (it may print errors while
+- open builds/msvc/vs2017/libzmq.sln
+- switch "draft API" and "libsodium" options on
+- change "output file name" to $(TargetName)-pw
+- build (it may print errors while
   building tests which can be ignored)
 
 ## Build
@@ -54,6 +57,8 @@ Checkout https://github.com/evernym/libzmq-pw repository.
   - set LIBZMQ_INCLUDE_DIR=C:\BIN\x64\include
 - set static flag for libsodium build
   - set SODIUM_STATIC=y
+- set PATH to find .dlls:
+  - set PATH=C:\BIN\x64;%PATH%
 - change dir to sovrin-client and run cargo (you may want to add --release --target x86_64-pc-windows-msvc keys to cargo)
 
 ## openssl-sys workaround
